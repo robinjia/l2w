@@ -3,6 +3,7 @@ import sys, time, os
 import math
 import torch
 import torch.nn as nn
+import torch.optim as optim
 
 path = os.path.realpath(__file__)
 path = path[:path.rindex('/')+1]
@@ -27,15 +28,17 @@ parser.add_argument('--emsize', type=int, default=1024,
                     help='size of word embeddings')
 parser.add_argument('--nhid', type=int, default=1024,
                     help='number of hidden units per layer')
+parser.add_argument('--proj', action='store_true',
+                    help='flag true if nhid!=emsize')
 parser.add_argument('--nlayers', type=int, default=1,
                     help='number of layers')
 parser.add_argument('--cutoffs', nargs='+', type=int,
                     help='cutoffs for buckets in adaptive softmax')
-parser.add_argument('--lr', type=float, default=1,
+parser.add_argument('--lr', type=float, default=0.1,
                     help='initial learning rate')
-parser.add_argument('--ar', type=float, default=0.9,
+parser.add_argument('--ar', type=float, default=0.1,
                     help='learning rate annealing rate')
-parser.add_argument('--clip', type=float, default=0.25,
+parser.add_argument('--clip', type=float, default=1.0,
                     help='gradient clipping')
 parser.add_argument('--epochs', type=int, default=10,
                     help='upper epoch limit')
@@ -45,7 +48,7 @@ parser.add_argument('--eval_batch_size', type=int, default=1024, metavar='N',
                     help='batch size')
 parser.add_argument('--bptt', type=int, default=35,
                     help='sequence length')
-parser.add_argument('--dropout', type=float, default=0.2,
+parser.add_argument('--dropout', type=float, default=0.01,
                     help='dropout applied to layers (0 = no dropout)')
 parser.add_argument('--tied', action='store_true',
                     help='tie the word embedding and softmax weights')
@@ -78,7 +81,7 @@ with doing('Loading data'):
 
 with doing('Constructing model'):
     if args.old is None:
-        model = model.RNNModel(args.model, ntokens, args.emsize, args.nhid, args.nlayers, cutoffs, args.dropout, args.tied)
+        model = model.RNNModel(args.model, ntokens, args.emsize, args.nhid, args.nlayers, cutoffs, args.proj, args.dropout, args.tied)
     else:
         with open(args.old, 'rb') as model_file:
             model = torch.load(model_file)
@@ -86,6 +89,8 @@ with doing('Constructing model'):
         model.cuda()
     
     criterion = AdaptiveLoss(cutoffs)
+    optimizer = optim.Adagrad(model.parameters(), args.lr, weight_decay=1e-6)
+
 
 ###############################################################################
 # Training code
@@ -139,12 +144,12 @@ def train():
         loss = criterion(output, target.view(-1))
         loss.backward()
 
-
         # `clip_grad_norm` helps prevent the exploding gradient problem in RNNs.
         torch.nn.utils.clip_grad_norm(model.parameters(), args.clip)
-        for p in model.parameters():
-            if p.grad is not None:
-                p.data.add_(-lr, p.grad.data)
+        optimizer.step()
+        # for p in model.parameters():
+        #     if p.grad is not None:
+        #         p.data.add_(-lr, p.grad.data)
 
         total_loss += loss.data.cpu()
 
@@ -158,15 +163,6 @@ def train():
                 elapsed * 1000 / args.log_interval, cur_loss, math.exp(cur_loss),
                 val_loss, math.exp(val_loss)))
 
-            # Save the model if the validation loss is the best we've seen so far.
-            if not best_val_loss or val_loss < best_val_loss:
-                with open(args.save, 'wb') as f:
-                    torch.save(model, f)
-                best_val_loss = val_loss
-            else:
-                # Anneal the learning rate if no improvement has been seen in the validation dataset.
-                lr *= args.ar
-
             total_loss = 0
             start_time = time.time()
 
@@ -178,6 +174,16 @@ try:
         epoch_start_time = time.time()
         train()
         val_loss = evaluate('valid')
+
+        # Save the model if the validation loss is the best we've seen so far.
+        if not best_val_loss or val_loss < best_val_loss:
+            with open(args.save, 'wb') as f:
+                torch.save(model, f)
+            best_val_loss = val_loss
+        # else:
+            # Anneal the learning rate if no improvement has been seen in the validation dataset.
+            # lr *= args.ar
+
         print('-' * 89)
         print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
                 'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),

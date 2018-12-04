@@ -6,7 +6,7 @@ from adaptive_softmax import AdaptiveSoftmax
 class RNNModel(nn.Module):
     """Container module with an encoder, a recurrent module, and a decoder. Based on official pytorch examples"""
 
-    def __init__(self, rnn_type, ntoken, ninp, nhid, nlayers, cutoffs, dropout=0.5, tie_weights=False):
+    def __init__(self, rnn_type, ntoken, ninp, nhid, nlayers, cutoffs, proj=False, dropout=0.5, tie_weights=False):
         super(RNNModel, self).__init__()
         self.drop = nn.Dropout(dropout)
         self.encoder = nn.Embedding(ntoken, ninp)
@@ -19,12 +19,20 @@ class RNNModel(nn.Module):
                 raise ValueError( """An invalid option for `--model` was supplied,
                                  options are ['GRU', 'RNN_TANH' or 'RNN_RELU']""")
             self.rnn = nn.RNN(ninp, nhid, nlayers, nonlinearity=nonlinearity, dropout=dropout)
-        self.decoder = nn.Linear(nhid, ntoken)
+
+        if ninp != nhid:
+            self.proj = nn.Linear(nhid, ninp)
 
         if tie_weights:
-            if nhid != ninp:
+            if nhid != ninp and not proj:
                 raise ValueError('When using the tied flag, nhid must be equal to emsize')
+            self.decoder = nn.Linear(ninp, ntoken)
             self.decoder.weight = self.encoder.weight
+        else:
+            if nhid != ninp and not proj:
+                self.decoder = nn.Linear(nhid, ntoken)
+            else:
+                self.decoder = nn.Linear(ninp, ntoken)
 
         self.init_weights()
 
