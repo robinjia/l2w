@@ -87,7 +87,8 @@ class RNNPredictor():
         else:
             output = output.data
 
-        ps = output[-1,:,:].exp()
+        # ps = output[-1,:,:].exp()
+        ps = output.exp() # we edited this part otherwise greedy won't run
         ps = ps.div(ps.sum(1).repeat(self.vocab_size, 1).t())
         vals, idxs = ps.max(dim=1)
         next_word = int(idxs[0])

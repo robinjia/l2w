@@ -43,6 +43,26 @@ class BeamSearchDecoder():
             step += 1
         return best.tokens
 
+class GreedyDecoder():
+    def __init__(self, predictor, term=1,
+                temperature=None, verbosity=0):
+        self.predictor = predictor
+        self.term = term
+        self.temperature = temperature
+        self.verbosity = verbosity
+
+    def decode(self, tokens, max_length=50, itos=None):
+        best = Candidate(tokens, [])
+        best, stop = self.predictor.top_next(best, self.term)
+
+        step = 0
+        while not stop and step < max_length:
+            best, stop = self.predictor.top_next(best, self.term)
+            step += 1
+
+        return best.tokens
+
+
 class BeamRerankDecoder():
     def __init__(self, predictor, scorers, coefs,
                 learn=False, lr=0.01, rescale_scores=True,

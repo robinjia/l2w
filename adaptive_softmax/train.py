@@ -13,7 +13,24 @@ from doing import doing
 import corpus
 import model
 
+import util
+
+import numpy as np
+
+from gbw import GBWDataset
+from fast_gbw import FastGBWDataset
+
+from torch.utils.serialization import load_lua
+
+from torch.autograd import Variable
+
 from adaptive_softmax import AdaptiveLoss
+from splitcross import SplitCrossEntropyLoss
+
+import logging
+
+logging.basicConfig(format='[%(asctime)s]: %(message)s',
+                    datefmt='%m/%d %I:%M:%S %p', level=logging.INFO)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--data', type=str,
@@ -44,7 +61,7 @@ parser.add_argument('--epochs', type=int, default=10,
                     help='upper epoch limit')
 parser.add_argument('--batch_size', type=int, default=64, metavar='N',
                     help='batch size')
-parser.add_argument('--eval_batch_size', type=int, default=1024, metavar='N',
+parser.add_argument('--eval_batch_size', type=int, default=1, metavar='N',
                     help='batch size')
 parser.add_argument('--bptt', type=int, default=35,
                     help='sequence length')
@@ -61,6 +78,10 @@ parser.add_argument('--save', type=str,  default='model.pt',
 # Hardware
 parser.add_argument('--cuda', action='store_true',
                     help='use CUDA')
+parser.add_argument('--lm1b', action='store_true',
+                    help='use GBW training mode for training LM1B, including efficient data loading')
+parser.add_argument('--valid_per_epoch', action='store_true',
+                    help='only evaluate at the end of epoch')
 parser.add_argument('--gpu', type=int,  default=0,
                     help='gpu to use')
 args = parser.parse_args()
@@ -74,22 +95,53 @@ if torch.cuda.is_available():
         torch.cuda.set_device(args.gpu)
         torch.cuda.manual_seed(args.seed)
 
-with doing('Loading data'):
-    corpus = corpus.Corpus(args.data, args.dic)
-    ntokens = len(corpus.dictionary.idx2word)
+if not args.lm1b:
+    with doing('Loading data'):
+        corpus = corpus.Corpus(args.data, args.dic)
+        ntokens = len(corpus.dictionary.idx2word)
+        cutoffs = args.cutoffs + [ntokens]
+else:
+    ###############################################################################
+    # Load data
+    ###############################################################################
+
+    # Torch
+    word_freq = load_lua(os.path.join(args.data, 'word_freq.th7')).numpy()
+    mapto = torch.from_numpy(util.reverse(np.argsort(-word_freq))).long()
+    print("load word frequency mapping - complete")
+
+    ntokens = len(word_freq)
+    nsampled = 8192
+
+    train_corpus = FastGBWDataset(args.data, 'train_data.th7', 'train_data.sid', mapto)
+    print("load train data - complete")
+
+    test_corpus = GBWDataset(args.data, 'test_data.th7', mapto)
+    print("load test data - complete")
+
     cutoffs = args.cutoffs + [ntokens]
 
-with doing('Constructing model'):
-    if args.old is None:
-        model = model.RNNModel(args.model, ntokens, args.emsize, args.nhid, args.nlayers, cutoffs, args.proj, args.dropout, args.tied)
-    else:
-        with open(args.old, 'rb') as model_file:
-            model = torch.load(model_file)
-    if args.cuda:
-        model.cuda()
-    
-    criterion = AdaptiveLoss(cutoffs)
-    optimizer = optim.Adagrad(model.parameters(), args.lr, weight_decay=1e-6)
+
+# with doing('Constructing model'):
+    # if not args.lm1b:
+    #     criterion = AdaptiveLoss(cutoffs)
+    # else:
+    #     criterion = SplitCrossEntropyLoss(args.emsize, args.cutoffs, verbose=False)
+    #     criterion.cuda()
+logging.info("Constructing model")
+criterion = AdaptiveLoss(cutoffs).cuda()
+if args.old is None:
+    logging.info("building model")
+    model = model.RNNModel(args.model, ntokens, args.emsize, args.nhid, args.nlayers, cutoffs, args.proj, args.dropout, args.tied,
+                           args.lm1b)
+else:
+    with open(args.old, 'rb') as model_file:
+        model = torch.load(model_file)
+if args.cuda:
+    model.cuda()
+
+optimizer = optim.Adagrad(model.parameters(), args.lr, weight_decay=1e-6)
+eval_batch_size = 1
 
 
 ###############################################################################
@@ -108,17 +160,37 @@ def repackage_hidden(h):
     else:
         return tuple(repackage_hidden(v) for v in h)
 
+def get_batch(item, device_id=0):
+    data, target, wrd_cnt, batch_num = item
+    return Variable(data.cuda(device_id)), Variable(target.view(-1).cuda(device_id)), wrd_cnt, batch_num
 
 def evaluate(split):
     # Turn on evaluation mode which disables dropout.
+    global ntokens
+
     model.eval()
     total_loss, nbatches = 0, 0
-    ntokens = len(corpus.dictionary.idx2word)
+    # ntokens = len(corpus.dictionary.idx2word) if not args.lm1b else ntokens
     hidden = model.init_hidden(args.eval_batch_size)
-    for source, target in corpus.iter(split, args.eval_batch_size, args.bptt, use_cuda=args.cuda):
+
+    if not args.lm1b:
+        data_gen = corpus.iter(split, args.eval_batch_size, args.bptt, use_cuda=args.cuda)
+    else:
+        data_gen = test_corpus.batch_generator(seq_length=args.bptt, batch_size=eval_batch_size, shuffle=False)
+
+    for item in data_gen:
+
+        if args.lm1b:
+            source, target, word_cnt, batch_num = get_batch(item)
+        else:
+            source, target = item
+
         model.softmax.set_target(target.data.view(-1))
+
         output, hidden = model(source, hidden)
+
         total_loss += criterion(output, target.view(-1)).data.sum()
+
         hidden = repackage_hidden(hidden)
         nbatches += 1
     return total_loss / nbatches
@@ -130,15 +202,23 @@ def train():
     model.train()
     total_loss, nbatches = 0, 0
     start_time = time.time()
-    ntokens = len(corpus.dictionary.idx2word)
     hidden = model.init_hidden(args.batch_size)
-    for b, batch in enumerate(corpus.iter('train', args.batch_size, args.bptt, use_cuda=args.cuda)):
+
+    if not args.lm1b:
+        data_gen = corpus.iter('train', args.batch_size, args.bptt, use_cuda=args.cuda)
+    else:
+        data_gen = train_corpus.batch_generator(seq_length=args.bptt, batch_size=args.batch_size)
+
+    for b, batch in enumerate(data_gen):
         model.train()
-        source, target = batch
+        if args.lm1b:
+            source, target, word_cnt, batch_len = get_batch(batch)
+        else:
+            source, target = batch
         # Starting each batch, we detach the hidden state from how it was previously produced.
         # If we didn't, the model would try backpropagating all the way to start of the dataset.
         hidden = repackage_hidden(hidden)
-        model.zero_grad()
+        model.zero_grad()  # optimizer.zero_grad()
         model.softmax.set_target(target.data.view(-1))
         output, hidden = model(source, hidden)
         loss = criterion(output, target.view(-1))
@@ -152,26 +232,33 @@ def train():
         #         p.data.add_(-lr, p.grad.data)
 
         total_loss += loss.data.cpu()
+        # logging.info(total_loss)
 
         if b % args.log_interval == 0 and b > 0:
             cur_loss = total_loss[0] / args.log_interval
             elapsed = time.time() - start_time
-            val_loss = evaluate('valid')
-            print('| epoch {:3d} | batch {:5d} | lr {:02.5f} | ms/batch {:5.2f} | '
-                    'loss {:5.2f} | ppl {:8.2f} | valid loss {:5.2f} | valid ppl {:8.2f}'.format(
-                epoch, b, lr,
-                elapsed * 1000 / args.log_interval, cur_loss, math.exp(cur_loss),
-                val_loss, math.exp(val_loss)))
+            if not args.valid_per_epoch:
+                val_loss = evaluate('valid')
+                logging.info('| epoch {:3d} | batch {:5d} | lr {:02.5f} | ms/batch {:5.2f} | '
+                        'loss {:5.2f} | ppl {:8.2f} | valid loss {:5.2f} | valid ppl {:8.2f}'.format(
+                    epoch, b, lr,
+                    elapsed * 1000 / args.log_interval, cur_loss, math.exp(cur_loss),
+                    val_loss, math.exp(val_loss)))
+            else:
+                logging.info('| epoch {:3d} | batch {:5d} | lr {:02.5f} | ms/batch {:5.2f} | '
+                      'loss {:5.2f} | ppl {:8.2f} '.format(
+                    epoch, b, lr,
+                    elapsed * 1000 / args.log_interval, cur_loss, math.exp(cur_loss)))
 
             total_loss = 0
             start_time = time.time()
-
 
 
 # At any point you can hit Ctrl + C to break out of training early.
 try:
     for epoch in range(1, args.epochs+1):
         epoch_start_time = time.time()
+        logging.info("training on epoch {}".format(epoch))
         train()
         val_loss = evaluate('valid')
 
@@ -184,11 +271,11 @@ try:
             # Anneal the learning rate if no improvement has been seen in the validation dataset.
             # lr *= args.ar
 
-        print('-' * 89)
-        print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
+        logging.info('-' * 89)
+        logging.info('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
                 'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
                                            val_loss, math.exp(val_loss)))
-        print('-' * 89)
+        logging.info('-' * 89)
 except KeyboardInterrupt:
     print('-' * 89)
     print('Exiting from training early')

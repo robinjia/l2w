@@ -70,7 +70,7 @@ class AdaptiveLoss(nn.Module):
 
     def reset(self):
         for criterion in self.criterions:
-            criterions.zero_grad()
+            criterion.zero_grad()
 
     def remap_target(self, target):
         new_target = [target.clone()]
