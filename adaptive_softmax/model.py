@@ -67,8 +67,9 @@ class RNNModel(nn.Module):
         output, hidden = self.rnn(emb, hidden)
         output = self.drop(output)
 
-        if self.proj:
-            output = self.proj_layer(output)
+        if "proj" in vars(self):
+            if self.proj:
+                output = self.proj_layer(output)
 
         output = output.view(output.size(0)*output.size(1), output.size(2))
 
