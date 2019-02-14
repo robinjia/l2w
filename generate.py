@@ -46,6 +46,8 @@ parser.add_argument('--seed', type=int, default=1111,
                     help='random seed')
 parser.add_argument('--trip', action='store_true',
                     help='random seed')
+parser.add_argument('--no_lower', action='store_true',
+                    help='Do not automatically convert string to lower case')
 ## Learning
 parser.add_argument('--learn', action='store_true')
 parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
@@ -102,32 +104,37 @@ if args.scorers:
             scorers.append(scorer)
             coefs.append(weight)
 if not args.trip:
-    decoder = decoders.BeamRerankDecoder(predictor,
-                                         scorers,
-                                         coefs,
-                                         learn=args.learn,
-                                         lr=args.lr,
-                                         ranking_loss=args.ranking_loss,
-                                         paragraph_level_score=args.paragraph_level_score,
-                                         beam_size=args.beam_size,
-                                         temperature=args.temp,
-                                         terms=[dictionary['</s>']],
-                                         forbidden=[dictionary['<unk>']],
-                                         sep=dictionary[args.sep],
-                                         verbosity=args.verbosity,
-                                         dictionary=dictionary)
-    lm_decoder = decoders.BeamRerankDecoder(predictor,
-                                         [],
-                                         [],
-                                         [],
-                                         [],
-                                         beam_size=args.beam_size,
-                                         temperature=args.temp,
-                                         terms=[dictionary['</s>']],
-                                         forbidden=[dictionary['<unk>']],
-                                         sep=dictionary[args.sep],
-                                         verbosity=args.verbosity,
-                                         dictionary=dictionary)
+    if args.beam_size == 1:
+        decoder = decoders.GreedyDecoder(predictor, term=dictionary['</s>'])
+        lm_decoder = decoders.GreedyDecoder(predictor,
+                                            term=dictionary['</s>'])
+    else:
+        decoder = decoders.BeamRerankDecoder(predictor,
+                                             scorers,
+                                             coefs,
+                                             learn=args.learn,
+                                             lr=args.lr,
+                                             ranking_loss=args.ranking_loss,
+                                             paragraph_level_score=args.paragraph_level_score,
+                                             beam_size=args.beam_size,
+                                             temperature=args.temp,
+                                             terms=[dictionary['</s>']],
+                                             forbidden=[dictionary['<unk>']],
+                                             sep=dictionary[args.sep],
+                                             verbosity=args.verbosity,
+                                             dictionary=dictionary)
+        lm_decoder = decoders.BeamRerankDecoder(predictor,
+                                             [],
+                                             [],
+                                             [],
+                                             [],
+                                             beam_size=args.beam_size,
+                                             temperature=args.temp,
+                                             terms=[dictionary['</s>']],
+                                             forbidden=[dictionary['<unk>']],
+                                             sep=dictionary[args.sep],
+                                             verbosity=args.verbosity,
+                                             dictionary=dictionary)
 else:
     decoder = decoders.BeamRerankDecoder(predictor,
                                          scorers,
@@ -142,18 +149,22 @@ else:
                                          sep=dictionary[args.sep],
                                          verbosity=args.verbosity,
                                          dictionary=dictionary)
-    lm_decoder = decoders.BeamRerankDecoder(predictor,
-                                         [],
-                                         [],
-                                         [],
-                                         [],
-                                         beam_size=args.beam_size,
-                                         temperature=args.temp,
-                                         terms=[dictionary['</s>'], dictionary['<end>']],
-                                         forbidden=[dictionary['<unk>'], dictionary['<beg>']],
-                                         sep=dictionary[args.sep],
-                                         verbosity=args.verbosity,
-                                         dictionary=dictionary)
+    if args.beam_size == 1:
+        lm_decoder = decoders.GreedyDecoder(predictor,
+                                            term=dictionary['</s>'])
+    else:
+        lm_decoder = decoders.BeamRerankDecoder(predictor,
+                                             [],
+                                             [],
+                                             [],
+                                             [],
+                                             beam_size=args.beam_size,
+                                             temperature=args.temp,
+                                             terms=[dictionary['</s>'], dictionary['<end>']],
+                                             forbidden=[dictionary['<unk>'], dictionary['<beg>']],
+                                             sep=dictionary[args.sep],
+                                             verbosity=args.verbosity,
+                                             dictionary=dictionary)
 
 print("Start decoding")
 avg, a_n = None, 0
@@ -168,8 +179,12 @@ for i in range(args.epochs):
 
             else:
                 initial, continuation = line.split('\t')[:2]
-                init_tokens = initial.strip().lower().split()
-                true_cont_tokens = continuation.strip().lower().split()
+                if args.no_lower:
+                    init_tokens = initial.strip().split()
+                    true_cont_tokens = continuation.strip().split()
+                else:
+                    init_tokens = initial.strip().lower().split()
+                    true_cont_tokens = continuation.strip().lower().split()
                 true_cont_ints = [dictionary[token] for token in true_cont_tokens]
                 init_tokens_ints = [dictionary[token] for token in init_tokens]
     
