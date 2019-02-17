@@ -2,7 +2,10 @@ import math
 import sys
 
 import torch
-from torch.utils.serialization import load_lua
+try:
+  from torch.utils.serialization import load_lua
+except:
+  pass
 import numpy as np
 
 def initialize(matrix):
